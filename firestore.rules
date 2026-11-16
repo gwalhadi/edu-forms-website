@@ -1,0 +1,90 @@
+rules_version = '2';
+
+// Security rules for منصة نماذج المعلمات
+// ------------------------------------------------------------------
+// BEFORE PUBLISHING: replace PASTE_ADMIN_UID below with your own User UID
+// (Firebase Console → Authentication → Users → User UID).
+//
+//  • Everyone (no login): can read published forms, the school identity and logos.
+//  • Only the owner account: can create / edit / delete / publish forms and change the identity.
+//  • Original blank PDFs of "PDF forms" (pdfFiles): readable by id, written only by the owner.
+//  • Nothing else exists: teachers' answers and PDFs are never stored, so there is nothing to protect there.
+// ------------------------------------------------------------------
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null && request.auth.uid == 'PASTE_ADMIN_UID';
+    }
+
+    function validForm(slug) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['slug', 'title', 'description', 'tags', 'icon', 'status', 'sortOrder', 'version', 'schema', 'createdAt', 'updatedAt'])
+        && d.slug == slug
+        && slug.matches('^[a-z0-9]([a-z0-9-]{0,58}[a-z0-9])?$')
+        && d.title is string && d.title.size() > 0 && d.title.size() <= 200
+        && d.status in ['draft', 'published', 'inactive']
+        && d.schema is string && d.schema.size() <= 400000
+        && d.description is string && d.description.size() <= 1000
+        && d.tags is list && d.tags.size() <= 10
+        && d.sortOrder is int;
+    }
+
+    // Forms: the public sees only published ones.
+    match /forms/{slug} {
+      allow get, list: if isAdmin() || resource.data.status == 'published';
+      allow create, update: if isAdmin() && validForm(slug);
+      allow delete: if isAdmin();
+    }
+
+    // School identity texts (public).
+    match /site/settings {
+      allow read: if true;
+      allow write: if isAdmin() && request.resource.data.size() <= 40;
+    }
+
+    // Logos (always public) and the principal's signature/stamp (public only when the owner enables it).
+    match /images/{key} {
+      allow get: if isAdmin() || resource.data.public == true;
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && key in ['logo', 'logo2', 'principalSig', 'stamp']
+        && request.resource.data.keys().hasOnly(['dataUrl', 'public', 'updatedAt'])
+        && request.resource.data.dataUrl is string
+        && request.resource.data.dataUrl.size() <= 900000
+        && request.resource.data.public is bool
+        && (key in ['principalSig', 'stamp'] || request.resource.data.public == true);
+      allow delete: if isAdmin();
+    }
+
+    // Original PDFs of "PDF forms" (blank templates uploaded by the owner, never teachers' answers).
+    // Anyone may read a file by its random id (teachers need it to fill the form); only the owner writes.
+    match /pdfFiles/{fileId} {
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && fileId.matches('^[A-Za-z0-9_-]{8,40}$')
+        && request.resource.data.keys().hasOnly(['name', 'size', 'chunks', 'createdAt'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 200
+        && request.resource.data['size'] is int && request.resource.data['size'] <= 10485760
+        && request.resource.data['chunks'] is int && request.resource.data['chunks'] >= 1 && request.resource.data['chunks'] <= 20;
+      allow delete: if isAdmin();
+
+      match /chunks/{n} {
+        allow get: if true;
+        allow list: if isAdmin();
+        allow create, update: if isAdmin()
+          && n.matches('^[0-9]{1,2}$')
+          && request.resource.data.keys().hasOnly(['data'])
+          && request.resource.data.data is string
+          && request.resource.data.data.size() <= 900000;
+        allow delete: if isAdmin();
+      }
+    }
+
+    // Everything else is closed.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
