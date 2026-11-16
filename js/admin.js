@@ -5,6 +5,8 @@ import { generatePdf, openPdfTab } from './pdf.js';
 import { validateSchema } from '../shared/core.js';
 import * as fb from './fb.js';
 import { formUrl } from './teacher-shell.js';
+import { pdfUploadScreen, buildPdfDesigner } from './pdf-designer.js';
+import { templateBytes } from './pdf-template.js';
 
 const FSTATUS = { published: ['منشور', 'ok'], inactive: ['موقوف', 'gray'], draft: ['مسودة', 'warn'] };
 const pill = (map, k) => h('span.pill.' + (map[k]?.[1] || 'gray'), map[k]?.[0] || k);
@@ -104,7 +106,8 @@ async function route() {
   side.querySelectorAll('a[data-k]').forEach((a) => a.classList.toggle('active', a.dataset.k === k));
   main.replaceChildren(h('p.muted', 'جارٍ التحميل…'));
   try {
-    if (k === 'forms' && parts[1]) await viewFormEditor(decodeURIComponent(parts[1]));
+    if (k === 'forms' && parts[1] === 'new-pdf') viewPdfUpload();
+    else if (k === 'forms' && parts[1]) await viewFormEditor(decodeURIComponent(parts[1]));
     else if (k === 'forms') await viewForms();
     else if (k === 'identity') await viewIdentity();
     else if (k === 'backup') viewBackup();
@@ -155,10 +158,12 @@ async function viewForms() {
   const onboarding = !forms.length ? h('div.card.panel', h('h2', 'ابدئي من هنا'),
     h('p.muted', 'قاعدة البيانات فارغة. يمكنك نقل النماذج الأربعة الحالية مع هوية المدرسة والشعار بضغطة واحدة، ثم مراجعتها وتعديلها.'),
     h('button.btn.primary', { type: 'button', onclick: (e) => importInitial(e.currentTarget) }, icon('download', 16), 'نقل النماذج الحالية'),
-    ' ', h('a.btn', { href: '#/forms/new' }, icon('plus', 16), 'إنشاء نموذج من الصفر')) : null;
+    ' ', h('a.btn', { href: '#/forms/new' }, icon('plus', 16), 'إنشاء نموذج من الصفر'),
+    ' ', h('a.btn', { href: '#/forms/new-pdf' }, icon('file', 16), 'نموذج من ملف PDF جاهز')) : null;
   main.replaceChildren(
     head('إدارة النماذج',
       h('a.btn.primary', { href: '#/forms/new' }, icon('plus', 16), 'نموذج جديد'),
+      h('a.btn.primary', { href: '#/forms/new-pdf', title: 'ارفعي نموذج PDF جاهزًا وسيتم اكتشاف الحقول تلقائيًا' }, icon('file', 16), 'نموذج من ملف PDF'),
       h('button.btn', { onclick: importJSON }, icon('code', 16), 'استيراد JSON')),
     h('p.muted.small', 'النماذج «المنشورة» فقط تظهر للمعلمات. رابط الموقع للمعلمات: ', h('span.ref', { dir: 'ltr' }, absUrl('./')),
       ' ', h('button.btn.sm.ghost', { type: 'button', onclick: () => navigator.clipboard?.writeText(absUrl('./')).then(() => toast('تم نسخ رابط الموقع')) }, icon('copy', 14), 'نسخ')),
@@ -169,7 +174,7 @@ async function viewForms() {
         h('td', h('div.acts', { style: { justifyContent: 'flex-start' } },
           h('button.icon-btn', { title: 'أعلى', 'aria-label': 'نقل للأعلى', disabled: i === 0, onclick: () => move(i, -1) }, icon('up')),
           h('button.icon-btn', { title: 'أسفل', 'aria-label': 'نقل للأسفل', disabled: i === forms.length - 1, onclick: () => move(i, 1) }, icon('down')))),
-        h('td', h('b', f.title), h('div.small.muted', h('span.ref', { dir: 'ltr' }, f.slug))),
+        h('td', h('b', f.title), ' ', fb.pdfFileIdOf(f) ? h('span.pill.pdf', { title: 'نموذج مبني على ملف PDF الأصلي' }, 'PDF') : null, h('div.small.muted', h('span.ref', { dir: 'ltr' }, f.slug))),
         h('td', pill(FSTATUS, f.status)),
         h('td', { style: { whiteSpace: 'nowrap' } }, f.updatedAt ? fmtDate(f.updatedAt) : '—'),
         h('td', h('div.acts',
@@ -186,25 +191,44 @@ async function viewForms() {
               toast('تم إنشاء نسخة (مسودة)'); location.hash = `#/forms/${slug}`;
             } catch (e) { toast(fb.errText(e), 'err'); }
           } }, icon('copy')),
-          h('button.icon-btn', { title: 'تصدير JSON', 'aria-label': 'تصدير JSON', onclick: () => {
+          h('button.icon-btn', { title: 'تصدير JSON', 'aria-label': 'تصدير JSON', onclick: async () => {
             const { title, slug, description, tags, icon: ic, schema } = f;
-            downloadBlob(new Blob([JSON.stringify({ title, slug, description, tags, icon: ic, schema }, null, 2)], { type: 'application/json' }), `${f.slug}.json`);
+            const out = { title, slug, description, tags, icon: ic, schema };
+            const pid = fb.pdfFileIdOf(f);
+            if (pid) { try { out.pdfFile = { id: pid, ...(await fb.adminExportPdfFile(pid)) }; } catch (e) { toast(fb.errText(e), 'err'); return; } }
+            downloadBlob(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }), `${f.slug}.json`);
           } }, icon('download')),
           h('button.icon-btn.danger', { title: 'حذف', 'aria-label': 'حذف النموذج', onclick: async () => {
             if (!await confirmDialog('حذف النموذج', `سيتم حذف النموذج «${f.title}» نهائيًا.\nإذا أردتِ فقط إخفاءه عن المعلمات فاستخدمي «إيقاف».`, { okLabel: 'حذف', danger: true })) return;
-            try { await fb.adminDeleteForm(f.slug); toast('تم حذف النموذج'); } catch (e) { toast(fb.errText(e), 'err'); }
+            try {
+              await fb.adminDeleteForm(f.slug); toast('تم حذف النموذج');
+              const pid = fb.pdfFileIdOf(f); // its original PDF, unless another form (a copy) still uses it
+              if (pid && !forms.some((x) => x.slug !== f.slug && fb.pdfFileIdOf(x) === pid)) await fb.adminDeletePdfFile(pid).catch((e) => console.warn(e));
+            } catch (e) { toast(fb.errText(e), 'err'); }
             viewForms();
           } }, icon('trash'))))))))) : (onboarding ? null : h('div.empty', 'لا توجد نماذج بعد.')));
 }
 
 function importJSON() {
   const ta = h('textarea.inp.code', { placeholder: '{ "title": "...", "schema": { "sections": [...] } }' });
+  let fileText = '';
+  const fileLbl = h('span.small.muted');
+  const fileInp = h('input', { type: 'file', accept: 'application/json,.json', hidden: true, onchange: async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    fileText = await f.text(); fileLbl.textContent = f.name; ta.value = ''; ta.disabled = true;
+  } });
   modal({
     title: 'استيراد نموذج من JSON', wide: true,
-    body: h('div', h('p.small.muted', 'الصقي ملف JSON لنموذج سبق تصديره من هذه المنصة.'), ta),
+    body: h('div', h('p.small.muted', 'الصقي ملف JSON لنموذج سبق تصديره من هذه المنصة، أو اختاري الملف (نماذج PDF تحتوي الملف الأصلي، لذلك يُفضّل اختيار الملف).'),
+      h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '10px' } }, fileInp, h('button.btn.sm', { type: 'button', onclick: () => fileInp.click() }, icon('file', 15), 'اختيار ملف JSON…'), fileLbl), ta),
     actions: [{ label: 'استيراد', kind: 'primary', onClick: async () => {
       let obj;
-      try { obj = JSON.parse(ta.value); } catch { toast('صيغة JSON غير صحيحة', 'err'); return false; }
+      try { obj = JSON.parse(fileText || ta.value); } catch { toast('صيغة JSON غير صحيحة', 'err'); return false; }
+      if (obj?.schema?.mode === 'pdf') {
+        const pf = obj.pdfFile;
+        if (!pf || pf.id !== obj.schema.pdfTemplate?.fileId) { toast('ملف JSON لا يحتوي ملف PDF الأصلي لهذا النموذج', 'err'); return false; }
+        try { await fb.importPdfFile(pf.id, pf); } catch (e) { toast(fb.errText(e), 'err'); return false; }
+      }
       const errs = validateSchema(obj.schema);
       if (!String(obj.title || '').trim()) errs.unshift('عنوان النموذج مطلوب');
       if (errs.length) { toast(errs[0], 'err'); return false; }
@@ -218,6 +242,37 @@ function importJSON() {
   });
 }
 
+function viewPdfUpload() {
+  setTitle('نموذج جديد من ملف PDF');
+  main.replaceChildren(pdfUploadScreen({
+    onReady: async ({ form, bytes, detection }) => {
+      try { await mountPdfDesigner(form, bytes, detection); } catch (e) { console.error(e); toast(e.message, 'err'); }
+    },
+  }));
+}
+
+/** The editor for forms built on an uploaded PDF. */
+async function mountPdfDesigner(form, bytes, detection = null) {
+  let curSlug = form.id ? form.slug : null;
+  setTitle(curSlug ? `تعديل: ${form.title}` : 'نموذج جديد من ملف PDF');
+  const ed = await buildPdfDesigner(form, {
+    bytes, detection,
+    settings: () => settings,
+    onSave: async (payload) => {
+      const slug = String(payload.slug || '').trim().toLowerCase() || (curSlug ?? await fb.freeSlug('pdf-' + Math.random().toString(36).slice(2, 8)));
+      const saved = await fb.adminSaveForm(curSlug, { ...payload, slug, sortOrder: null });
+      toast('تم حفظ النموذج');
+      if (curSlug !== saved.slug) {
+        curSlug = saved.slug;
+        history.replaceState(null, '', `#/forms/${encodeURIComponent(saved.slug)}`);
+      }
+      return saved;
+    },
+  });
+  leaveGuard = async () => !ed.isDirty() || confirmDialog('تغييرات غير محفوظة', 'لم تحفظي التعديلات على النموذج. هل تريدين المغادرة؟', { okLabel: 'مغادرة', danger: true });
+  main.replaceChildren(ed.el);
+}
+
 async function viewFormEditor(slugOrNew) {
   let form;
   if (slugOrNew === 'new') {
@@ -225,6 +280,15 @@ async function viewFormEditor(slugOrNew) {
   } else {
     form = await fb.adminGetForm(slugOrNew);
     if (!form) { main.replaceChildren(h('div.banner.err', icon('alert'), 'النموذج غير موجود'), h('a.btn', { href: '#/forms' }, 'العودة')); return; }
+    if (form.schema?.mode === 'pdf') {
+      let bytes;
+      try { bytes = await templateBytes(form.schema.pdfTemplate?.fileId); } catch (e) {
+        main.replaceChildren(h('div.banner.err', icon('alert'), h('span.grow', `${fb.errText(e)}. يمكنك استعادته من نسخة احتياطية، أو حذف النموذج وإنشاؤه من جديد.`)), h('a.btn', { href: '#/forms' }, 'العودة'));
+        return;
+      }
+      await mountPdfDesigner(form, bytes);
+      return;
+    }
   }
   let curSlug = form.id ? form.slug : null;
   setTitle(curSlug ? `تعديل: ${form.title}` : 'نموذج جديد');
