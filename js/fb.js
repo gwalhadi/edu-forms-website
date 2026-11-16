@@ -4,6 +4,8 @@
 //   forms/{slug}        { slug, title, description, tags[], icon, status, sortOrder, version, schema (JSON string), createdAt, updatedAt }
 //   site/settings       school identity texts and options (public)
 //   images/{key}        { dataUrl, public, updatedAt }   key = logo | logo2 | principalSig | stamp
+//   pdfFiles/{fileId}   { name, size, chunks, createdAt }  original PDF of a "PDF form" (blank template, no answers)
+//   pdfFiles/{fileId}/chunks/{n}  { data }  base64 pieces (≤ 900 KB each; Firestore documents are limited to 1 MiB)
 //
 // Teachers' answers and PDFs are never sent anywhere: they stay in the browser.
 import { initializeApp } from '../vendor/firebase/firebase-app.js';
@@ -259,9 +261,14 @@ export async function exportBackup() {
   const images = {};
   for (const k of IMAGE_KEYS) { if (settings[k]) images[k] = settings[k]; delete settings[k]; }
   delete settings.initialized;
+  const pdfFiles = {};
+  for (const id of new Set(forms.map(pdfFileIdOf).filter(Boolean))) {
+    try { pdfFiles[id] = await exportPdfFile(id); } catch (e) { console.warn('pdf file missing', id, e); }
+  }
   return {
     format: 'edu-forms-backup', version: 1, exportedAt: new Date().toISOString(), settings, images,
     forms: forms.map(({ slug, title, description, tags, icon, status, sortOrder, schema }) => ({ slug, title, description, tags, icon, status, sortOrder, schema })),
+    ...(Object.keys(pdfFiles).length ? { pdfFiles } : {}),
   };
 }
 
@@ -277,6 +284,8 @@ export async function importBackup(obj, { mode = 'merge', withSettings = true, v
     if (errs.length) throw new Error(`«${f.title}»: ${errs[0]}`);
   }
   const d = fs();
+  // original PDFs of "PDF forms" first, so that a restored form never points at a missing file
+  for (const [id, f] of Object.entries(obj.pdfFiles || {})) await importPdfFile(id, f);
   const existing = await adminListForms();
   const b = writeBatch(d);
   if (mode === 'replace') for (const f of existing) if (!obj.forms.some((x) => x.slug === f.slug)) b.delete(doc(d, 'forms', f.slug));
@@ -286,4 +295,97 @@ export async function importBackup(obj, { mode = 'merge', withSettings = true, v
     await adminSaveSettings({ ...obj.settings, ...(obj.images || {}) }, {});
   }
   return obj.forms.length;
+}
+
+
+// ================= ORIGINAL PDF FILES ("PDF forms") =================
+// The blank PDF uploaded by the owner is stored in Firestore in base64 pieces, because Cloud Storage is not
+// available on the free Spark plan for new projects. Teachers only read it; their answers are never sent.
+export const MAX_PDF_BYTES = 10 * 1024 * 1024;
+const PDF_CHUNK = 900_000; // base64 characters per document
+export const PDF_ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
+export const pdfFileIdOf = (form) => (form?.schema?.mode === 'pdf' ? form.schema.pdfTemplate?.fileId || '' : '');
+
+function bytesToB64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const newPdfId = () => 'p' + Array.from(crypto.getRandomValues(new Uint8Array(15)), (b) => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('');
+
+/** Reads an original PDF (public read; used by teachers and the owner). */
+export async function getPdfFile(id) {
+  if (!PDF_ID_RE.test(String(id || ''))) throw new Error('ملف PDF غير صالح');
+  const d = fs();
+  const meta = await getDoc(doc(d, 'pdfFiles', id));
+  if (!meta.exists()) throw Object.assign(new Error('ملف PDF الأصلي لهذا النموذج غير موجود'), { code: 'pdf-missing' });
+  const n = Number(meta.data().chunks) || 0;
+  const parts = await Promise.all(Array.from({ length: n }, (_, i) => getDoc(doc(d, 'pdfFiles', id, 'chunks', String(i)))));
+  if (parts.some((x) => !x.exists())) throw Object.assign(new Error('ملف PDF الأصلي غير مكتمل'), { code: 'pdf-missing' });
+  const bytes = b64ToBytes(parts.map((x) => String(x.data().data || '')).join(''));
+  if (meta.data().size && bytes.length !== Number(meta.data().size)) throw new Error('ملف PDF الأصلي تالف');
+  return bytes;
+}
+
+async function writePdfB64(id, b64, { name = '', size = 0, onProgress } = {}) {
+  const d = fs();
+  const n = Math.max(1, Math.ceil(b64.length / PDF_CHUNK));
+  for (let i = 0; i < n; i += 4) { // ≤ 4 pieces (~3.6 MB) per request
+    const b = writeBatch(d);
+    for (let j = i; j < Math.min(n, i + 4); j++) b.set(doc(d, 'pdfFiles', id, 'chunks', String(j)), { data: b64.slice(j * PDF_CHUNK, (j + 1) * PDF_CHUNK) });
+    await b.commit();
+    onProgress?.(Math.min(n, i + 4), n);
+  }
+  // the description is written last: a file is only "complete" when it exists
+  await setDoc(doc(d, 'pdfFiles', id), { name: String(name).slice(0, 200), size: Number(size) || 0, chunks: n, createdAt: serverTimestamp() });
+}
+
+/** Uploads a new original PDF and returns its id. */
+export async function adminSavePdfFile(bytes, { name = '', onProgress } = {}) {
+  if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error('الملف فارغ');
+  if (bytes.length > MAX_PDF_BYTES) throw new Error('حجم ملف PDF أكبر من ١٠ ميجابايت');
+  const id = newPdfId();
+  await writePdfB64(id, bytesToB64(bytes), { name, size: bytes.length, onProgress });
+  return id;
+}
+
+/** Deletes an original PDF (only call it when no form uses it any more). */
+export async function adminDeletePdfFile(id) {
+  if (!PDF_ID_RE.test(String(id || ''))) return;
+  const d = fs();
+  const chunks = await getDocs(collection(d, 'pdfFiles', id, 'chunks'));
+  const b = writeBatch(d);
+  chunks.docs.forEach((c) => b.delete(c.ref));
+  b.delete(doc(d, 'pdfFiles', id));
+  await b.commit();
+}
+
+/** Deletes the original PDF of a deleted/changed form when no other form still uses it. */
+export async function adminCleanupPdfFile(id) {
+  if (!id) return;
+  const forms = await adminListForms();
+  if (forms.some((f) => pdfFileIdOf(f) === id)) return;
+  await adminDeletePdfFile(id);
+}
+
+async function exportPdfFile(id) {
+  const d = fs();
+  const meta = await getDoc(doc(d, 'pdfFiles', id));
+  const bytes = await getPdfFile(id);
+  return { name: meta.data()?.name || '', size: bytes.length, data: bytesToB64(bytes) };
+}
+export { exportPdfFile as adminExportPdfFile };
+
+/** Restores an original PDF from a backup / exported form (kept as is when it already exists). */
+export async function importPdfFile(id, f) {
+  if (!PDF_ID_RE.test(String(id || '')) || !f || typeof f.data !== 'string' || !/^[A-Za-z0-9+/]+=*$/.test(f.data)) throw new Error('ملف PDF في النسخة الاحتياطية غير صالح');
+  if ((await getDoc(doc(fs(), 'pdfFiles', id))).exists()) return;
+  if (f.data.length > Math.ceil(MAX_PDF_BYTES / 3) * 4 + 4) throw new Error('ملف PDF في النسخة الاحتياطية كبير جدًا');
+  await writePdfB64(id, f.data, { name: f.name || '', size: Math.floor(f.data.length * 3 / 4) - (f.data.endsWith('==') ? 2 : f.data.endsWith('=') ? 1 : 0) });
 }
