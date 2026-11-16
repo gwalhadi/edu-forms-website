@@ -13,6 +13,7 @@ export const FIELD_TYPES = {
   radio: { label: 'اختيار واحد', simple: true },
   checkbox: { label: 'اختيار متعدد', simple: true },
   signature: { label: 'توقيع إلكتروني', simple: true },
+  tick: { label: 'مربع علامة (✓)', simple: true },
   list: { label: 'قائمة بنود قابلة للإضافة', simple: false },
   rating: { label: 'جدول تقييم', simple: false },
   signatureGrid: { label: 'جدول أسماء وتواقيع', simple: false },
@@ -89,6 +90,7 @@ export function valueText(field, data) {
       if (v === '__other') return data?.[field.id + '__other'] ? `أخرى: ${data[field.id + '__other']}` : 'أخرى';
       return v ?? '';
     case 'signature': return v ? '(موقّع)' : '';
+    case 'tick': return v === true ? '✓' : '';
     case 'list': return (Array.isArray(v) ? v : []).filter((x) => String(x).trim()).map((x, i) => `${i + 1}. ${x}`).join('\n');
     case 'rating': return (field.items || []).map((it, i) => {
       const r = Array.isArray(v) ? v[i] : null;
@@ -214,6 +216,11 @@ export function validate(schema, data, { requireAll = true } = {}) {
         if (f.allowOther) clean[f.id + '__other'] = String(data[f.id + '__other'] ?? '').slice(0, LIMITS.text);
         break;
       }
+      case 'tick': {
+        if (req(f) && v !== true) err('هذا الحقل مطلوب');
+        clean[f.id] = v === true;
+        break;
+      }
       case 'signature': {
         if (!validSignature(v)) err('توقيع غير صالح');
         else if (req(f) && !v) err('التوقيع مطلوب');
@@ -293,7 +300,23 @@ export function validateSchema(schema) {
     if (f.showIf?.field && !ids.has(f.showIf.field)) errs.push(`شرط الإظهار للحقل "${f.label}" يشير إلى حقل غير موجود`);
     if (f.type === 'day' && f.autoFrom && !ids.has(f.autoFrom)) errs.push(`الحقل "${f.label}" مرتبط بتاريخ غير موجود`);
   }
+  if (schema.mode === 'pdf') errs.push(...validatePdfTemplate(schema));
   if (JSON.stringify(schema).length > 400_000) errs.push('النموذج كبير جدًا');
+  return errs;
+}
+
+/** Extra checks for forms built on an uploaded PDF (fields positioned on the original pages). */
+export const PDF_FIELD_TYPES = ['text', 'textarea', 'number', 'date', 'day', 'select', 'tick', 'signature'];
+function validatePdfTemplate(schema) {
+  const errs = [];
+  const t = schema.pdfTemplate;
+  if (!t || typeof t !== 'object' || !/^[A-Za-z0-9_-]{8,40}$/.test(String(t.fileId || ''))) return ['ملف PDF الأصلي غير مرفوع'];
+  if (!Array.isArray(t.pages) || !t.pages.length) return ['معلومات صفحات ملف PDF مفقودة'];
+  for (const f of allFields(schema)) {
+    const b = f.box;
+    if (!PDF_FIELD_TYPES.includes(f.type)) { errs.push(`نوع الحقل "${f.label}" غير مدعوم في نماذج PDF`); continue; }
+    if (!b || !Number.isInteger(b.p) || !t.pages[b.p] || ![b.x, b.y, b.w, b.h].every(Number.isFinite) || b.w <= 0 || b.h <= 0) errs.push(`موضع الحقل "${f.label}" على الملف غير صالح`);
+  }
   return errs;
 }
 
@@ -330,6 +353,7 @@ function simpleValueHTML(f, data) {
       return `<span class="opts">${opts.join('')}</span>`;
     }
     case 'signature': return sigImg(v);
+    case 'tick': return v === true ? BOX_ON : BOX_OFF;
     case 'textarea': return nl2br(applyFormat(f, valueText(f, data)));
     default: return esc(applyFormat(f, valueText(f, data)));
   }
