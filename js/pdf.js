@@ -188,9 +188,76 @@ export async function generatePdf(schema, data, settings, { onProgress } = {}) {
   }
 }
 
+// Append evidence pages without uploading files. pdf-lib is bundled locally.
+let pdfLibPromise;
+function loadPdfLib() {
+  if (window.PDFLib) return Promise.resolve(window.PDFLib);
+  pdfLibPromise ||= new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = new URL('../vendor/pdf-lib.min.js', import.meta.url).href;
+    script.onload = () => window.PDFLib ? resolve(window.PDFLib) : reject(new Error('PDFLib unavailable'));
+    script.onerror = () => reject(new Error('PDF library missing'));
+    document.head.append(script);
+  });
+  return pdfLibPromise;
+}
+async function appendEvidence(original, groups) {
+  const attachments = (groups || []).flatMap(g => (g.files || []).map(file => ({ file, label: g.field.label })));
+  if (!attachments.length) return original;
+  const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
+  const doc = await PDFDocument.load(await original.arrayBuffer());
+  const notes = [];
+  for (const { file, label } of attachments) {
+    const type = file.type.toLowerCase();
+    const name = file.name.toLowerCase();
+    try {
+      if (type === 'application/pdf' || name.endsWith('.pdf')) {
+        const src = await PDFDocument.load(await file.arrayBuffer());
+        const pages = await doc.copyPages(src, src.getPageIndices());
+        pages.forEach(page => doc.addPage(page));
+      } else if (type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(name)) {
+        let bytes = await file.arrayBuffer();
+        let image;
+        if (type === 'image/png' || name.endsWith('.png')) image = await doc.embedPng(bytes);
+        else if (type === 'image/jpeg' || /\.jpe?g$/i.test(name)) image = await doc.embedJpg(bytes);
+        else {
+          const url = URL.createObjectURL(file);
+          try {
+            const bitmap = await createImageBitmap(file);
+            const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+            canvas.getContext('2d').drawImage(bitmap, 0, 0); bitmap.close?.();
+            image = await doc.embedPng(await (await fetch(canvas.toDataURL('image/png'))).arrayBuffer());
+            canvas.width = canvas.height = 0;
+          } finally { URL.revokeObjectURL(url); }
+        }
+        const page = doc.addPage([595.28, 841.89]);
+        const scale = Math.min(535 / image.width, 770 / image.height);
+        page.drawImage(image, { x: (595.28 - image.width * scale) / 2, y: (841.89 - image.height * scale) / 2, width: image.width * scale, height: image.height * scale });
+      } else notes.push(file.name);
+    } catch (error) {
+      console.error('Evidence attachment error:', file.name, error);
+      throw new Error(`تعذر إضافة المرفق: ${file.name}`);
+    }
+  }
+  if (notes.length) {
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([595.28, 841.89]);
+    page.drawText('Other attached documents (filenames only):', { x: 40, y: 790, size: 13, font, color: rgb(0.2, 0.2, 0.2) });
+    let y = 760;
+    for (const name of notes) {
+      // Standard Helvetica does not support Arabic; show non-Latin names in main form only.
+      const ascii = name.replace(/[^\x20-\x7e]/g, '?').slice(0, 85);
+      page.drawText(ascii, { x: 40, y, size: 10, font }); y -= 20;
+      if (y < 45) break;
+    }
+  }
+  return new Blob([await doc.save()], { type: 'application/pdf' });
+}
+
 /** Generates and downloads; returns the number of bytes. */
 export async function downloadPdf(schema, data, settings, fileName, opts) {
-  const blob = await generatePdf(schema, data, settings, opts);
+  const base = await generatePdf(schema, data, settings, opts);
+  const blob = await appendEvidence(base, opts?.attachments);
   const name = `${String(fileName || 'نموذج').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 80) || 'form'}.pdf`;
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
