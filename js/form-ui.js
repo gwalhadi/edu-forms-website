@@ -1,6 +1,7 @@
 import { h, icon, toLatinDigits } from './common.js';
 import { DAYS, dateInfo, isVisible, allFields } from '../shared/core.js';
 import { signatureButton } from './signature.js';
+import { setAttachments, getAttachments } from './attachments.js';
 
 let uid = 0;
 const nid = (p) => `${p}-${++uid}`;
@@ -91,6 +92,25 @@ function renderField(f, data, changed, fieldEls, sec) {
         },
       });
       wrap.append(labelFor(f, id), inp, help, err);
+      break;
+    }
+    case 'file': {
+      const input = h('input.inp', { id, type: 'file', accept: f.accept || 'image/*,.pdf,.doc,.docx,.xls,.xlsx', multiple: f.multiple !== false });
+      const status = h('div.help');
+      const paint = () => { status.textContent = getAttachments(f.id).length
+        ? getAttachments(f.id).map(x => x.name).join('، ')
+        : (Array.isArray(data[f.id]) && data[f.id].length ? 'الملفات السابقة غير محفوظة. أعيدي إرفاقها قبل التنزيل.' : 'الصور وصفحات PDF تُضاف للتقرير؛ ملفات Word وExcel تظهر أسماؤها فقط.'); };
+      input.addEventListener('change', () => {
+        const files = [...input.files];
+        if (files.length > 15 || files.some(x => x.size > 20 * 1024 * 1024)) {
+          status.textContent = 'الحد الأقصى 15 ملفًا، وحجم كل ملف 20 ميجابايت.';
+          input.value = ''; return;
+        }
+        setAttachments(f.id, files);
+        set(files.map(x => x.name)); paint();
+      });
+      paint();
+      wrap.append(labelFor(f, id), input, status, help, err);
       break;
     }
     case 'textarea': {
