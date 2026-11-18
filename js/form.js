@@ -5,6 +5,7 @@ import { docPreview } from './preview.js';
 import { downloadPdf } from './pdf.js';
 import { validate } from '../shared/core.js';
 import { getForm, errText, waitForUser } from './fb.js';
+import { clearAttachments, allAttachments } from './attachments.js';
 
 const params = new URLSearchParams(location.search);
 const slug = params.get('f') || '';
@@ -95,7 +96,7 @@ function maybeRestoreBanner() {
 
 async function clearForm() {
   if (!await confirmDialog('مسح النموذج', 'سيتم مسح جميع البيانات المدخلة في هذا النموذج. هل تريدين المتابعة؟', { okLabel: 'مسح', danger: true })) return;
-  data = initialData(schema); dirty = false; store.del(autoKey);
+  clearAttachments(); data = initialData(schema); dirty = false; store.del(autoKey);
   buildEdit(); window.scrollTo({ top: 0, behavior: 'smooth' }); toast('تم مسح النموذج');
 }
 
@@ -136,6 +137,7 @@ let pv;
 function showPreview() {
   const v = checkValid();
   if (!v.ok) return;
+  if (allAttachments(schema).some(x => (v.clean[x.field.id] || []).length && !x.files.length)) { toast('أعيدي إرفاق الملفات قبل معاينة التقرير', 'err'); return; }
   pv = docPreview(schema, v.clean, settings);
   const dlBtn = h('button.btn.primary', { type: 'button', onclick: () => doDownload(dlBtn, v.clean) }, icon('download', 16), 'تنزيل PDF');
   previewView.replaceChildren(
@@ -158,7 +160,7 @@ async function doDownload(btn, clean) {
   busy = true; btn.classList.add('loading');
   const label = btn.lastChild; const orig = label.textContent;
   try {
-    await downloadPdf(schema, clean, settings, form.title, { onProgress: (i, n) => { label.textContent = n > 1 ? `جارٍ الإنشاء ${i}/${n}` : 'جارٍ الإنشاء…'; } });
+    await downloadPdf(schema, clean, settings, form.title, { attachments: allAttachments(schema), onProgress: (i, n) => { label.textContent = n > 1 ? `جارٍ الإنشاء ${i}/${n}` : 'جارٍ الإنشاء…'; } });
     toast('تم تنزيل ملف PDF');
   } catch (e) {
     console.error(e);
