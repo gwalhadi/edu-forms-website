@@ -155,6 +155,7 @@ export function buildEditor(form, { onSave, settings = () => ({}) }) {
       body: h('div.type-grid', Object.entries(FIELD_TYPES).map(([t, meta]) => h('button', { type: 'button', onclick: () => {
         const f = { id: rid(), type: t, label: meta.label, width: ['text', 'number', 'date', 'day', 'select'].includes(t) ? 'half' : 'full' };
         if (['select', 'radio', 'checkbox'].includes(t)) f.options = ['الخيار الأول', 'الخيار الثاني'];
+        if (t === 'file') Object.assign(f, { accept: 'image/*,.pdf,.doc,.docx,.xls,.xlsx', multiple: true });
         if (t === 'list') Object.assign(f, { defaultItems: 3, addLabel: 'إضافة بند', pdfMinRows: 3 });
         if (t === 'rating') Object.assign(f, { items: ['العنصر الأول', 'العنصر الثاني'], scale: ['ممتاز', 'جيد', 'مقبول'], notes: true, scaleHeader: 'التقدير', itemsHeader: 'العنصر' });
         if (t === 'signatureGrid') Object.assign(f, { perRow: 3, defaultRows: 3, nameLabel: 'اسم الحاضرة', addLabel: 'إضافة صف' });
@@ -202,6 +203,10 @@ export function buildEditor(form, { onSave, settings = () => ({}) }) {
     if (t !== 'note') out.push(lab('تلميح أسفل الحقل', inp(f, 'help')));
     if (['text', 'textarea'].includes(t)) out.push(lab('أقصى عدد أحرف', inp(f, 'maxLength', { type: 'number' })));
     if (t === 'textarea') out.push(lab('عدد الأسطر', inp(f, 'rows', { type: 'number' })));
+    if (t === 'file') {
+      out.push(lab('أنواع الملفات المسموحة (accept)', inp(f, 'accept', { placeholder: 'image/*,.pdf,.doc,.docx,.xls,.xlsx' }), '.full'));
+      out.push(h('div', { style: { alignSelf: 'end' } }, check(f, 'multiple', 'السماح بإرفاق عدة ملفات', { def: true })));
+    }
     if (t === 'number') { out.push(lab('أقل قيمة', inp(f, 'min', { type: 'number' }))); out.push(lab('أكبر قيمة', inp(f, 'max', { type: 'number' }))); }
     if (['text', 'number'].includes(t)) out.push(lab('صيغة العرض في PDF', inp(f, 'pdfFormat', { placeholder: 'مثال: الأسبوع {{value}}' })));
     if (t === 'date') out.push(h('div', { style: { alignSelf: 'end' } }, check(f, 'showHijri', 'إظهار التاريخ الهجري مع الميلادي', { def: true })));
