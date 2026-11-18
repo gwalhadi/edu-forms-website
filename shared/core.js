@@ -13,6 +13,7 @@ export const FIELD_TYPES = {
   radio: { label: 'اختيار واحد', simple: true },
   checkbox: { label: 'اختيار متعدد', simple: true },
   signature: { label: 'توقيع إلكتروني', simple: true },
+  file: { label: 'إرفاق ملفات (صور / PDF / مستندات)', simple: true },
   tick: { label: 'مربع علامة (✓)', simple: true },
   list: { label: 'قائمة بنود قابلة للإضافة', simple: false },
   rating: { label: 'جدول تقييم', simple: false },
@@ -90,6 +91,7 @@ export function valueText(field, data) {
       if (v === '__other') return data?.[field.id + '__other'] ? `أخرى: ${data[field.id + '__other']}` : 'أخرى';
       return v ?? '';
     case 'signature': return v ? '(موقّع)' : '';
+    case 'file': return Array.isArray(v) ? v.join('، ') : ''; 
     case 'tick': return v === true ? '✓' : '';
     case 'list': return (Array.isArray(v) ? v : []).filter((x) => String(x).trim()).map((x, i) => `${i + 1}. ${x}`).join('\n');
     case 'rating': return (field.items || []).map((it, i) => {
@@ -161,6 +163,12 @@ export function validate(schema, data, { requireAll = true } = {}) {
     const v = data[f.id];
     const err = (m) => { errors[f.id] = m; };
     switch (f.type) {
+      case 'file': {
+        const names = Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 15).map(x => x.slice(0, 180)) : [];
+        if (req(f) && !names.length) err('أرفقي ملفًا واحدًا على الأقل');
+        clean[f.id] = names;
+        break;
+      }
       case 'text': case 'textarea': {
         const s = v == null ? '' : String(v);
         const max = f.maxLength || (f.type === 'text' ? LIMITS.text : LIMITS.textarea);
